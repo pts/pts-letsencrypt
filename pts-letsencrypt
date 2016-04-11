@@ -11,17 +11,18 @@ exec python -- ${1+"$@"}; exit 1
 
 This script needs Python 2.4 .. 2.7 to run. It doesn't work with Python 3.x.
 It has been tested with Python 2.7.
+
+This script is written carefully so that porting to Windows becomes possible
+in the future.
 """
 
-# TODO(pts): Support passing around -v, -vvvv etc. to increase verbosity.
 # TODO(pts): Set umask, chmod certs vs chmod webroot dir.
 # TODO(pts): Add docs to the docstring, print the docstring for --help.
-# TODO(pts): Remove unused stuff from site-packages.
+# TODO(pts): Remove more unused stuff from site-packages.
 # TODO(pts): ignore warning (at least doc): WARNING:letsencrypt.client:Non-standard path(s), might not work with crontab installed by your operating system package manager
-# TODO(pts): eliminate letsencrypt.conf ?
-# TODO(pts): Don't renew if not needed.
-# TODO(pts): Multiple domains.
-# TODO(pts): Remove plemark.txt in a finally: block.
+# TODO(pts): Don't renew if it's too early.
+# TODO(pts): Support multiple domains.
+# TODO(pts): Add command processing for `revoke'.
 
 """ !! TODO(pts): Not needed.
 cp -a ssz.conf letsencrypt.sztestc/letsencrypt.conf
@@ -67,16 +68,24 @@ def try_import_cli():
 
 def run_cli_main(cli_main, cli_args):
   import sys
+  old_excepthook = sys.excepthook
   sys.argv[0] = 'letsencrypt'
-  return cli_main(cli_args=cli_args)
+  try:
+    return cli_main(cli_args=cli_args)
+  finally:
+    sys.excepthook = old_excepthook
 
 
 def usage():
   import sys
   return ('Usage:\n' +
-      '%s [--<flag>=<value> ...] create\n' % sys.argv[0] +
-      '%s [--<flag>=<value> ...] renew\n' % sys.argv[0] +
-      '%s [--<flag>=<value> ...] pass [...]\n' % sys.argv[0])
+      '%s --config-dir=... --domains=... --email=... [...]\n' % sys.argv[0] +
+      '  To create a certificate. It will create the config-dir.\n' +
+      '  Useful flag for testing: --staging.\n' +
+      '%s --config-dir=...\n' % sys.argv[0] +
+      '  To renew a certificate.\n' +
+      '%s [--<flag>=<value> ...] <command> [...]\n' % sys.argv[0] +
+      '  To run the letsencrypt tool.\n')
 
 
 def mkdir_if_missing(dirname):
@@ -132,7 +141,12 @@ def http_download(host, suburl):
 def format_flags(flags):
   args = []
   for key, value in sorted(flags.iteritems()):
-    if value is False:
+    if key == 'v':
+      assert isinstance(value, int)
+      assert value >= 0
+      for _ in xrange(value):
+        args.append('-v')
+    elif value is False:
       pass
     elif value is True:
       args.append('--%s' % key)
@@ -145,6 +159,12 @@ def process_flag(flags, arg):
   arg = arg.lstrip('-')
   j = arg.find('=')
   if j < 0:
+    if arg in ('v', 'verbose'):
+      flags['v'] = flags.get('v', 0) + 1
+      return
+    elif arg and not arg.rstrip('v'):  # E.g. '-vvv'.
+      flags['v'] = flags.get('v', 0) + len(arg)
+      return
     key, value = arg, True
   else:
     key, value = arg[:j], arg[j + 1:]
@@ -190,16 +210,21 @@ def main(args=None):
       break
   dir_arg = flags.get('config-dir')
 
-  if cmdargs in (['create'], ['renew']):
+  if cmdargs == []:
     if not dir_arg:
       print >>sys.stderr, 'fatal: Missing flag --config-dir=...'
       sys.exit(1)
-    if cmdargs[0] == 'renew':
-      flags['renew'] = 'True'
+    if 'renew' in flags:
+      print >>sys.stderr, 'fatal: Please do not specify --renew'
+      sys.exit(1)
+    if 'config' in flags:
+      print >>sys.stderr, 'fatal: Please do not specify --config=...'
+      sys.exit(1)
 
     flags2 = dict(flags)
     flags2.pop('config-dir', None)
     flags2.pop('renew', None)
+    flags2.pop('v', None)
     args2 = format_flags(flags2)
     config_data = ''.join(arg + '\n' for arg in args2)
     config_fn = os.path.join(dir_arg, 'pts-letsencrypt.flags')
@@ -216,10 +241,16 @@ def main(args=None):
       finally:
         f.close()
       rargs.sort()
-      # !! TODO(pts): Don't overwrite with different values -- unless no csr yet.
-      assert not args2 or rargs == args2, (rargs, args2)
+      # TODO(pts): Allow overwrite if no csr yet (e.g. after a failed httplib).
+      if args2 and rargs != args2:
+        print >>sys.stderr, (
+            'fatal: Command-line flags (%r) do not match flags in '
+            'config file %s (%r).' %
+            (args2, config_fn, rargs))
+        print >>sys.stderr, (
+            'fatal: For certificate renewal, just specify --config-dir=...')
+        sys.exit(1)
     else:
-      # !! TODO(pts): Don't save if unchanged? --agree-tos --authenticator=webroot --noninteractive --text
       mkdir_if_missing(dir_arg)
       f = open(config_fn, 'w')
       try:
@@ -255,7 +286,6 @@ def main(args=None):
     mkdir_if_missing(os.path.join(dir_arg, 'work'))
     mkdir_if_missing(os.path.join(dir_arg, 'log'))
 
-    # !! TODO(pts): Remember flags for --renew. Save them.
     plefn = os.path.join(dir_arg, 'webroot', '.well-known',
                          'acme-challenge', 'plemark.txt')
     import random
@@ -263,62 +293,65 @@ def main(args=None):
     # Doesn't matter much, doesn't have to be secure.
     pledata = '%08x' % (int(time.time()) & 0xffffffff) + ''.join(
         '%02x' % random.randrange(256) for i in xrange(30)) + '\n'
-    f = open(plefn, 'w')
     try:
-      f.write(pledata)
-    finally:
-      f.close()
-    suburl = '/.well-known/acme-challenge/plemark.txt'
-    url = 'http://%s%s' % (domains[0], suburl)
-    http_result = http_download(domains[0], suburl)
-    expected_http_result = (200, 'OK', pledata)
-    if http_result != expected_http_result:
-      http_result = (http_result[0], http_result[1], http_result[2][:128])
-      print >>sys.stderr, (
-          'error: Got from webserver for %s: %r\n'
-          '       Expected: %r' %
-          (url, http_result, expected_http_result))
-      print >>sys.stderr, (
-          'fatal: Please set up your webserver on localhost so that '
-          '%s/ serves %s/ , and rerun this command.' %
-          (url[:url.rfind('/')], os.path.abspath(os.path.dirname(plefn))))
-      sys.exit(2)
+      f = open(plefn, 'w')
+      try:
+        f.write(pledata)
+      finally:
+        f.close()
+      suburl = '/.well-known/acme-challenge/plemark.txt'
+      url = 'http://%s%s' % (domains[0], suburl)
+      http_result = http_download(domains[0], suburl)
+      expected_http_result = (200, 'OK', pledata)
+      if http_result != expected_http_result:
+        http_result = (http_result[0], http_result[1], http_result[2][:128])
+        print >>sys.stderr, (
+            'error: Got from webserver for %s: %r\n'
+            '       Expected: %r' %
+            (url, http_result, expected_http_result))
+        print >>sys.stderr, (
+            'fatal: Please set up your webserver on localhost so that '
+            '%s/ serves %s/ , and rerun this command.' %
+            (url[:url.rfind('/')], os.path.abspath(os.path.dirname(plefn))))
+        sys.exit(2)
 
-    flags['config-dir'] = dir_arg  # TODO(pts): Disallow --config-dir or rename --dir?
+      flags.setdefault('logs-dir', os.path.join(dir_arg, 'log'))
+      flags.setdefault('work-dir', os.path.join(dir_arg, 'work'))
+      # Not needed: flags['config'] = ...
+      if os.path.exists(os.path.join(dir_arg, 'csr')):
+        # Directory 'csr' was created when the certificate was first created.
+        # So we want to renew.
+        flags['renew'] = True
+      cli_args = format_flags(flags)
+      cli_args.append('certonly')
+      purpose = ('creation', 'renewal')[bool(flags.get('renew'))]
+      print >>sys.stderr, 'info: Running letsencrypt for %s with args: %r' % (
+          purpose, cli_args)
+      try:
+        cli_error = run_cli_main(cli_main, cli_args)
+      except SystemExit, e:
+        cli_error = e[0]
+      except:
+        cli_error = sys.exc_info()[:2]
+        traceback.format_exc()
+      # TODO(pts): Remove the custom error handler set up by run_cli_main.
+      if cli_error:
+        for subdir in ('renewal', 'keys', 'csr', 'archive', 'accounts', 'live'):
+          remove_recursively(os.path.join(dir_arg, subdir))
+        print >>sys.stderr, 'error: Error running letsencrypt: %s' % (cli_error,)
+        sys.exit(3)
+      print >>sys.stderr, 'info: Certificate %s OK.' % purpose
+    finally:
+      # Keep plefn until this so that cli_main doesn't try to remove the
+      # acme-challenge dir.
+      remove_if_exists(plefn)
+    # The `IMPORTANT NOTES:' will be printed after this, in the exit hook.
+  else:
     flags.setdefault('logs-dir', os.path.join(dir_arg, 'log'))
     flags.setdefault('work-dir', os.path.join(dir_arg, 'work'))
-    #flags['config'] = os.path.join(dir_arg, 'pts-letsencrypt.conf')
-    cli_args = format_flags(flags)
-    cli_args.append('certonly')
-    print >>sys.stderr, 'info: Running letsencrypt with args: %r' % cli_args
-    try:
-      cli_error = run_cli_main(cli_main, cli_args)
-    except:
-      cli_error = sys.exc_info()[:2]
-      traceback.format_exc()
-    # TODO(pts): Remove the custom error handler set up by run_cli_main.
-    if cli_error:
-      for subdir in ('renewal', 'keys', 'csr', 'archive', 'accounts', 'live'):
-        remove_recursively(os.path.join(dir_arg, subdir))
-      print >>sys.stderr, 'info: Error running letsencrypt: %s' % cli_error
-      sys.exit(3)
-    print >>sys.stderr, 'info: Certificate creation OK.'
-    # Keep plefn until this so that cli_main doesn't try to remove the
-    # acme-challenge dir.
-    remove_if_exists(plefn)
-    # !! TODO(pts): Test --renew.
-    # !! TODO(pts): Autodetect renew based on files in dir.
-    # The `IMPORTANT NOTES:' will be printed after this, in the exit hook.
-  elif cmdargs and cmdargs[0] == 'pass':
-    # TODO(pts): Pass --config-dir and --logs-dir if --dir was specified.
-    del cmdargs[0]
     cli_args = format_flags(flags)
     cli_args.extend(cmdargs)
     sys.exit(run_cli_main(cli_main, cli_args))
-  else:
-    sys.stderr.write('fatal: Unknown command: %r\n%s' % (cmdargs, usage()))
-    sys.exit(1)
-
 
 
 if __name__ == '__main__':
