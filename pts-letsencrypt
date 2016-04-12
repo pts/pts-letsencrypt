@@ -1,29 +1,42 @@
 #! /bin/sh
 # by pts@fazekas.hu at Mon Apr 11 20:50:45 CEST 2016
 
-""":" #pts-letsencrypt: Convenient script for manual letsencrypt on Unix.
+""":" #pts-letsencrypt: Convenient and secure wrapper for letsencrypt
 
+# This script needs Python 2.4 .. 2.7 to run. It doesn't work with Python 3.x.
+# It has been tested with Python 2.7.
 type python2.7 >/dev/null 2>&1 && exec python2.7 -- "$0" ${1+"$@"}
 type python2.6 >/dev/null 2>&1 && exec python2.6 -- "$0" ${1+"$@"}
 type python2.5 >/dev/null 2>&1 && exec python2.5 -- "$0" ${1+"$@"}
 type python2.4 >/dev/null 2>&1 && exec python2.4 -- "$0" ${1+"$@"}
 exec python -- ${1+"$@"}; exit 1
 
-This script needs Python 2.4 .. 2.7 to run. It doesn't work with Python 3.x.
-It has been tested with Python 2.7.
+pts-letsencrypt is a convenient and secure wrapper for the letsencrypt
+command-line tool. It calls letsencrypt with the right arguments to create,
+renew and revoke domain SSL certificates. It runs in batch mode (i.e. no
+interactive output from the user), and it can be called from cron jobs.
 
-This script is written carefully so that porting to Windows becomes possible
-in the future.
+See the documentation of pts-letsencrypt for information aboute these:
+
+* Installation instructions.
+
+* Creating your first SSL certificate.
+
+* Auto-renewing SSL certificates every 3 months.
+
+* The default operation mode of pts-letsencrypt is webroot, i.e. you need a
+  webserver running on port 80 (HTTP), which is able to serve the the files
+  generated in the /.well-known/acme-challenge URI created by pts-letsencrypt.
+  See the documentation of pts-letsencrypt for setting it up.
 """
 
-# TODO(pts): What are the problems of letsencrypt as is? running as root; writing in too many dirs (hard to copy to another machine); trying to edit webserver configs; is interactive by default; has too many library dependencies; needs too many flags to specify for renewal, too confusing, other side: same cert for multiple domains
+# This script is written carefully so that porting to Windows becomes possible
+# in the future.
+#
 # TODO(pts): Set umask, chmod certs vs chmod webroot dir. Protect everything (even after renew), but let the (non-root?) webserver access the live cert. At least restrict privkey.pem, but that's needed by the webserver.
-# TODO(pts): doc: Does nginx has to be reloaded to use the new cert?
-# TODO(pts): Add docs to the docstring, print the docstring for --help.
 # TODO(pts): Remove more unused plugins and stuff from site-packages, especially the standalone plugin and everything not needed.
 # TODO(pts): If supporting multiple domains, consider the --expand flag.
-# TODO(pts): Restore the directory contents (exept for csr) if renewal has failed.
-# TODO(pts): If the renewal/*.conf contains the wrong pathname, it can't be loaded. Either remove this file (if not needed) or make it a fatal error.
+# TODO(pts): Restore the directory contents (except for csr) if renewal has failed.
 # TODO(pts): Disable flag prefix parsing (e.g. --renew for --renew-by-default).
 
 
@@ -50,8 +63,9 @@ def try_import_cli():
     import letsencrypt.cli
   except ImportError:
     print >>sys.stderr, (
-        'fatal: error importing letsencrypt.cli -- '
-        'see message below and install dependencies')
+        'fatal: Error importing letsencrypt.cli -- '
+        'See messages below and read the installation instructions in the '
+        'documentation of pts-letsencrypt.')
     raise
   return letsencrypt.cli.main
 
@@ -197,7 +211,72 @@ def process_flag(flags, arg):
   flags[key] = value
 
 
+def fix_renewal_configs(config_dir, domains, server_arg):
+  """Keep ${config_dir}/renewal/*.conf correct and as short as possible."""
+  import os
+  renewal_dir = os.path.join(config_dir, 'renewal')
+  try:
+    filenames = os.listdir(renewal_dir)
+  except OSError:
+    filenames = ()
+  keep_filenames = [domain + '.conf' for domain in domains]
+  for filename in sorted(set(filenames).difference(keep_filenames)):
+    remove_if_exists(os.path.join(renewal_dir, filename))
+  config_dir_abs = os.path.abspath(config_dir)
+  for domain in domains:
+    filename = domain + '.conf'
+    server_value = server_arg
+    if server_value is None:
+      try:
+        f = open(os.path.join(renewal_dir, filename))
+      except (IOError, OSError):
+        f = None
+      if f is None:
+        continue
+      try:
+        for line in f:
+          if (not line.startswith('#') and not line.startswith('[') and
+              '=' in line):
+            key, value = line.split('=', 1)
+            key = key.strip()
+            value = value.strip()
+            if key == 'server':
+              server_value = value
+      finally:
+        f.close()
+
+    # We create a simple one so that letsencrypt cli_main can load it, and
+    # also so that the %(config_dir)s value is always correct, even if the
+    # config dir was moved.
+    data = (
+        '# Config file managed by pts-letsencrypt. Do not edit.\n'
+        'cert = %(config_dir)s/live/%(domain)s/cert.pem\n'
+        'privkey = %(config_dir)s/live/%(domain)s/privkey.pem\n'
+        'chain = %(config_dir)s/live/%(domain)s/chain.pem\n'
+        'fullchain = %(config_dir)s/live/%(domain)s/fullchain.pem\n'
+        '\n[renewalparams]\n'
+        'server = %(server)s\n' %
+        {'config_dir': config_dir_abs,
+         'domain': domain, 'server': server_value})
+    f = open(os.path.join(renewal_dir, filename), 'w')
+    try:
+      f.write(data)
+    finally:
+      f.close()
+
+
+def get_csr_pem_count(csr_dir):
+  import os
+  try:
+    return sum(1 for entry in os.listdir(csr_dir)
+               if entry.endswith('.pem'))
+  except OSError:
+    return 0
+
+
 def main(args=None):
+  """Function which is run when the script is started."""
+
   import os
   import sys
   import traceback
@@ -215,9 +294,18 @@ def main(args=None):
     # (under .well-known/acme-challenge/)
   }
   flags = {}
-  if args == ['--help']:
-    sys.stdout.write(usage())
+  if not args or args == ['--help']:
+    doc = __doc__
+    doc_line1 = doc[:doc.index('\n')]
+    doc_line1 = doc_line1[doc_line1.index('#') + 1:]
+    doc = doc[doc.index('\nexec ') + 1:]
+    doc = doc[doc.index('\n'):].strip()
+    sys.stdout.write('%s\n\n%s\n\n%s' % (doc_line1, doc, usage()))
     sys.exit(0)
+
+  setup_path()
+  cli_main = try_import_cli()
+  patch_non_standard_path_warning()
   
   cmdargs = []
   i = 0
@@ -289,7 +377,7 @@ def main(args=None):
         f.close()
       rargs.sort()
       # TODO(pts): Allow overwrite if no csr yet (e.g. after a failed httplib).
-      if args2 and rargs != args2:
+      if args2 and rargs and rargs != args2:
         print >>sys.stderr, (
             'fatal: Command-line flags (%r) do not match flags in '
             'config file %s (%r).' %
@@ -298,6 +386,8 @@ def main(args=None):
             'fatal: For certificate renewal, just specify --config-dir=...')
         sys.exit(1)
     else:
+      rargs = []
+    if args2 and not rargs:
       mkdir_if_missing(config_dir)
       f = open(config_fn, 'w')
       try:
@@ -336,6 +426,7 @@ def main(args=None):
                                   'acme-challenge'))
     mkdir_if_missing(os.path.join(config_dir, 'work'))
     mkdir_if_missing(os.path.join(config_dir, 'log'))
+    fix_renewal_configs(config_dir, domains, flags.get('server'))
 
     plefn = os.path.join(config_dir, 'webroot', '.well-known',
                          'acme-challenge', 'plemark.txt')
@@ -353,6 +444,7 @@ def main(args=None):
       suburl = '/.well-known/acme-challenge/plemark.txt'
       url = 'http://%s%s' % (domains[0], suburl)
       expected_http_result = (200, 'OK', pledata)
+
       if is_standalone:
         import socket
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM, 0)
@@ -426,8 +518,7 @@ def main(args=None):
         purpose = 'renewal'
       else:
         purpose = 'creation'
-      csr_pem_count = sum(1 for entry in os.listdir(csr_dir)
-                          if entry.endswith('.pem'))
+      csr_pem_count = get_csr_pem_count(csr_dir)
       print >>sys.stderr, 'info: Running letsencrypt for %s with args: %r' % (
           purpose, cli_args)
       try:
@@ -438,6 +529,7 @@ def main(args=None):
         cli_error = sys.exc_info()[:2]
         if flags.get('v') > 0:
           traceback.print_exc()
+      fix_renewal_configs(config_dir, domains, flags.get('server'))
       # TODO(pts): Remove the custom error handler set up by run_cli_main.
       if cli_error:
         if is_revoke:
@@ -454,8 +546,7 @@ def main(args=None):
             remove_recursively(os.path.join(config_dir, subdir))
         print >>sys.stderr, 'fatal: Error running letsencrypt: %s' % (cli_error,)
         sys.exit(3)
-      csr_pem_count2 = sum(1 for entry in os.listdir(csr_dir)
-                           if entry.endswith('.pem'))
+      csr_pem_count2 = get_csr_pem_count(csr_dir)
       msg = 'Certificate %s OK.' % purpose
       if is_revoke:
         open(os.path.join(config_dir, 'revoked.stamp'), 'a')
@@ -484,7 +575,4 @@ def main(args=None):
 
 
 if __name__ == '__main__':
-  setup_path()
-  cli_main = try_import_cli()
-  patch_non_standard_path_warning()
   main()
