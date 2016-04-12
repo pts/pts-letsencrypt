@@ -33,6 +33,7 @@ See the documentation of pts-letsencrypt for information aboute these:
 # This script is written carefully so that porting to Windows becomes possible
 # in the future.
 #
+# TODO(pts): Install six.
 # TODO(pts): What are the problems of letsencrypt as is? running as root; writing in too many dirs (hard to copy to another machine, and hard to move to another dir); trying to edit webserver configs; is interactive by default; has too many library dependencies; needs too many flags to specify for renewal, too confusing, other side: same cert for multiple domains; dialog
 # TODO(pts): Set umask, chmod certs vs chmod webroot dir. Protect everything (even after renew), but let the (non-root?) webserver access the live cert. At least restrict privkey.pem, but that's needed by the webserver.
 # TODO(pts): doc: Does nginx has to be reloaded to use the new cert?
