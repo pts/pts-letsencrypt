@@ -16,26 +16,16 @@ This script is written carefully so that porting to Windows becomes possible
 in the future.
 """
 
-# TODO(pts): Set umask, chmod certs vs chmod webroot dir.
+# TODO(pts): What are the problems of letsencrypt as is? running as root; writing in too many dirs; trying to edit webserver configs; is interactive by default; has too many library dependencies; needs too many flags to specify for renewal, too confusing, other side: same cert for multiple domains
+# TODO(pts): Set umask, chmod certs vs chmod webroot dir. Protect everything (even after renew), but let the (non-root?) webserver access the live cert.
+# TODO(pts): Does ngingx has to be reloaded to use the new cert?
 # TODO(pts): Add docs to the docstring, print the docstring for --help.
-# TODO(pts): Remove more unused stuff from site-packages.
-# TODO(pts): ignore warning (at least doc): WARNING:letsencrypt.client:Non-standard path(s), might not work with crontab installed by your operating system package manager
-# TODO(pts): Don't renew if it's too early.
-# TODO(pts): Support multiple domains.
+# TODO(pts): Remove more unused plugins and stuff from site-packages, especially the standalone plugin and everything not needed.
+# TODO(pts): !! Don't renew if it's too early to renew (such as --keep, but certonly seems to ignore it, is _should_, why config.renew_by_default is True?). (Maybe not with --staging.)
+#   2016-04-12 15:45:34,857:INFO:letsencrypt.cli:Cert not yet due for renewal
+# TODO(pts): If supporting multiple domains, consider the --expand flag.
 # TODO(pts): Add command processing for `revoke'.
 
-""" !! TODO(pts): Not needed.
-cp -a ssz.conf letsencrypt.sztestc/letsencrypt.conf
-~/letsencrypt-sw/letsencrypt \
-    --config-dir "$HOME/letsencrypt.sztestb" \
-    --logs-dir "$HOME/letsencrypt-log" \
-    --work-dir "$HOME/letsencrypt-work" \
-    --config ~/ssz.conf \
-    --renew certonly
-
-~/letsencrypt-sw/letsencrypt --config-dir "$HOME/letsencrypt.sztestc" --logs-dir "$HOME/letsencrypt.sztestc/log" --work-dir "$HOME/letsencrypt.sztestc/work" --config "$HOME/letsencrypt.sztestc/letsencrypt.conf" --renew certonly
-
-"""
 
 def setup_path():
   import os  
@@ -66,6 +56,19 @@ def try_import_cli():
   return letsencrypt.cli.main
 
 
+def patch_non_standard_path_warning():
+  """Omit displaying this warning (at least doc):
+
+  WARNING:letsencrypt.client:Non-standard path(s), might not work with crontab installed by your operating system package manager
+  """
+  import letsencrypt.client
+  old_warning = letsencrypt.client.logger.warning
+  def new_warning(msg, *args):  # TODO(pts): Can we avoid the circular ref?
+    if not str(msg).startswith('Non-standard path'):
+      old_warning(msg, *args)
+  letsencrypt.client.logger.warning = new_warning
+
+
 def run_cli_main(cli_main, cli_args):
   import sys
   old_excepthook = sys.excepthook
@@ -78,14 +81,18 @@ def run_cli_main(cli_main, cli_args):
 
 def usage():
   import sys
-  return ('Usage:\n' +
-      '%s --config-dir=... --domains=... --email=... [...]\n' % sys.argv[0] +
-      '  To create a certificate. It will create the config-dir.\n' +
-      '  Useful flag for testing: --staging.\n' +
-      '%s --config-dir=...\n' % sys.argv[0] +
-      '  To renew a certificate.\n' +
-      '%s [--<flag>=<value> ...] <command> [...]\n' % sys.argv[0] +
-      '  To run the letsencrypt tool.\n')
+  return (
+      'Usage:\n'
+      '%(argv0)s --config-dir=... --domains=... --email=... [...]\n'
+      '  To create a certificate. It will create the config-dir.\n'
+      '  Useful flag for testing: --staging.\n'
+      '%(argv0)s --config-dir=...\n'
+      '  To renew a certificate. It remembers the flags at creation time.\n'
+      '%(argv0)s --help all\n'
+      '  To get the help of the letsencrypt tool.\n'
+      '%(argv0)s [--<flag>=<value> ...] <command> [...]\n'
+      '  To run the letsencrypt tool.\n' %
+      {'argv0': sys.argv[0]})
 
 
 def mkdir_if_missing(dirname):
@@ -128,14 +135,23 @@ def remove_recursively(pathname):
 
 def http_download(host, suburl):
   import httplib
-  # Doesn't follow redirects. Good.
-  conn = httplib.HTTPConnection(host, timeout=10)
-  conn.request('GET', suburl)
-  r1 = conn.getresponse()
-  reason = 'OK'
-  if r1.status != 200:
-    reason = r1.reason
-  return (r1.status, reason, r1.read())
+  import socket
+  try:
+    # Doesn't follow redirects. Good.
+    conn = httplib.HTTPConnection(host, timeout=10)
+    conn.request('GET', suburl)
+    r1 = conn.getresponse()
+    reason = 'OK'
+    if r1.status != 200:
+      reason = r1.reason
+    return (r1.status, reason, r1.read())
+  except (IOError, OSError, socket.error, socket.timeout), e:
+    return (-1, '%s.%s' % (e.__class__.__module__, e.__class__.__name__),
+            str(e))
+  except:
+    e = sys.exc_info()[1]
+    return (-2, '%s.%s' % (e.__class__.__module__, e.__class__.__name__),
+            str(e))
 
 
 def format_flags(flags):
@@ -146,12 +162,16 @@ def format_flags(flags):
       assert value >= 0
       for _ in xrange(value):
         args.append('-v')
+    elif key == 'help':
+      continue  # Will be added below.
     elif value is False:
       pass
     elif value is True:
       args.append('--%s' % key)
     else:
       args.append('--%s=%s' % (key, value))
+  if flags.get('help'):  # Make it the last one for `--help all'.
+    args.append('--help')
   return args
 
 
@@ -168,6 +188,8 @@ def process_flag(flags, arg):
     key, value = arg, True
   else:
     key, value = arg[:j], arg[j + 1:]
+    if key == 'authenticator':
+      flags[value] = True  # E.g. 'webroot', 'standalone'.
   flags[key] = value
 
 
@@ -185,12 +207,11 @@ def main(args=None):
     'text': True,
     'noninteractive': True,
     'agree-tos': True,
-    'authenticator': 'webroot',
     #'staging': True,  # Enable this for testing.
     # (under .well-known/acme-challenge/)
   }
   flags = {}
-  if not args or args[0] == '--help':
+  if args == ['--help']:
     sys.stdout.write(usage())
     sys.exit(0)
   
@@ -210,21 +231,37 @@ def main(args=None):
       break
   dir_arg = flags.get('config-dir')
 
-  if cmdargs == []:
+  if cmdargs == [] and flags.get('help') is None:
     if not dir_arg:
       print >>sys.stderr, 'fatal: Missing flag --config-dir=...'
       sys.exit(1)
-    if 'renew' in flags:
-      print >>sys.stderr, 'fatal: Please do not specify --renew'
+    for key in ('renew', 'apache', 'nginx', 'manual'):
+      if key in flags:
+        print >>sys.stderr, 'fatal: Please do not specify --%s' % key
+        sys.exit(1)
+    for key in ('config', 'webroot-path'):
+      if key in flags:
+        print >>sys.stderr, 'fatal: Please do not specify --%s=...' % key
+        sys.exit(1)
+    if flags.get('standalone') and flags.get('webroot'):
+      print >>sys.stderr, (
+          'fatal: Please specify at most one of --standalone and --webroot')
       sys.exit(1)
-    if 'config' in flags:
-      print >>sys.stderr, 'fatal: Please do not specify --config=...'
-      sys.exit(1)
+    is_standalone = bool(flags.get('standalone'))
+    flags.pop('standalone', None)
+    flags.pop('webroot', None)
 
     flags2 = dict(flags)
     flags2.pop('config-dir', None)
     flags2.pop('renew', None)
     flags2.pop('v', None)
+    flags2.pop('keep-until-expiring', None)
+    flags2.pop('keep', None)
+    flags2.pop('reinstall', None)
+    flags2.pop('force-renewal', None)
+    flags2.pop('renew-by-default', None)
+    flags2.pop('autenticator', None)
+
     args2 = format_flags(flags2)
     config_data = ''.join(arg + '\n' for arg in args2)
     config_fn = os.path.join(dir_arg, 'pts-letsencrypt.flags')
@@ -277,7 +314,11 @@ def main(args=None):
     flags['domains'] = ','.join(domains)
 
     # (under .well-known/acme-challenge/)
-    flags['webroot-path'] = os.path.join(dir_arg, 'webroot')
+    if is_standalone:
+      flags['standalone'] = True  # Equivalent: --authenticator=webroot
+    else:
+      flags['webroot'] = True  # Equivalent: --authenticator=standalone
+      flags['webroot-path'] = os.path.join(dir_arg, 'webroot')
     mkdir_if_missing(dir_arg)
     mkdir_if_missing(os.path.join(dir_arg, 'webroot'))
     mkdir_if_missing(os.path.join(dir_arg, 'webroot', '.well-known'))
@@ -301,19 +342,53 @@ def main(args=None):
         f.close()
       suburl = '/.well-known/acme-challenge/plemark.txt'
       url = 'http://%s%s' % (domains[0], suburl)
-      http_result = http_download(domains[0], suburl)
       expected_http_result = (200, 'OK', pledata)
-      if http_result != expected_http_result:
-        http_result = (http_result[0], http_result[1], http_result[2][:128])
-        print >>sys.stderr, (
-            'error: Got from webserver for %s: %r\n'
-            '       Expected: %r' %
-            (url, http_result, expected_http_result))
-        print >>sys.stderr, (
-            'fatal: Please set up your webserver on localhost so that '
-            '%s/ serves %s/ , and rerun this command.' %
-            (url[:url.rfind('/')], os.path.abspath(os.path.dirname(plefn))))
-        sys.exit(2)
+      if is_standalone:
+        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM, 0)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+          # letsencrypt.plugins.standalone also binds to this address.
+          bind_address = ('', 80)
+          try:
+            sock.bind(bind_address)
+          except socket.error, e:
+            # TODO(pts): Port this to Windows.
+            err_msg = str(e).lower()
+            if 'permission' in err_msg:
+              print >>sys.stderr, (
+                  'fatal: Unable to bind to port 80, you probably need root '
+                  'permissions for that. You may rerun with sudo, but for '
+                  'better security, please use the default --webroot instead '
+                  'of --standalone')
+              sys.exit(4)
+            if 'address already in use' in err_msg:
+              # letsencrypt returns the program name and process ID here.
+              # TODO(pts): Reuse that code and display it as well.
+              print >>sys.stderr, (
+                  'fatal: Another program is listening on port 80, please '
+                  'stop it temporarily, rerun, and start it again. But please '
+                  'consider the default --webroot instead '
+                  'of --standalone')
+              sys.exit(4)
+            print >>sys.stderr, (
+                'fatal: Binding to port 80 failed: %s' % e)
+            sys.exit(4)
+        finally:
+          sock.close()
+      else:
+        http_result = http_download(domains[0], suburl)
+        if http_result != expected_http_result:
+          http_result = (http_result[0], http_result[1], http_result[2][:128])
+          print >>sys.stderr, (
+              'error: Got from webserver for %s: %r\n'
+              '       Expected: %r' %
+              (url, http_result, expected_http_result))
+          print >>sys.stderr, (
+              'fatal: Please set up your webserver on localhost so that '
+              '%s/ serves %s/ , and rerun this command.' %
+              (url[:url.rfind('/')], os.path.abspath(os.path.dirname(plefn))))
+          sys.exit(2)
 
       flags.setdefault('logs-dir', os.path.join(dir_arg, 'log'))
       flags.setdefault('work-dir', os.path.join(dir_arg, 'work'))
@@ -333,11 +408,14 @@ def main(args=None):
         cli_error = e[0]
       except:
         cli_error = sys.exc_info()[:2]
-        traceback.format_exc()
+        if flags.get('v') > 0:
+          traceback.print_exc()
       # TODO(pts): Remove the custom error handler set up by run_cli_main.
       if cli_error:
-        for subdir in ('renewal', 'keys', 'csr', 'archive', 'accounts', 'live'):
-          remove_recursively(os.path.join(dir_arg, subdir))
+        if not flags.get('renew'):
+          for subdir in ('renewal', 'keys', 'csr', 'archive', 'accounts',
+                         'live'):
+            remove_recursively(os.path.join(dir_arg, subdir))
         print >>sys.stderr, 'error: Error running letsencrypt: %s' % (cli_error,)
         sys.exit(3)
       print >>sys.stderr, 'info: Certificate %s OK.' % purpose
@@ -346,10 +424,15 @@ def main(args=None):
       # acme-challenge dir.
       remove_if_exists(plefn)
     # The `IMPORTANT NOTES:' will be printed after this, in the exit hook.
+    # If the certificate is not due for renewal, no notes are printed.
+    # TODO(pts): Always print an info message if it was not due.
   else:
-    flags.setdefault('logs-dir', os.path.join(dir_arg, 'log'))
-    flags.setdefault('work-dir', os.path.join(dir_arg, 'work'))
+    if dir_arg is not None:
+      flags.setdefault('logs-dir', os.path.join(dir_arg, 'log'))
+      flags.setdefault('work-dir', os.path.join(dir_arg, 'work'))
     cli_args = format_flags(flags)
+    if cmdargs and cmdargs[0] == 'help':  # Workaround.
+      cmdargs[0] = '--help'
     cli_args.extend(cmdargs)
     sys.exit(run_cli_main(cli_main, cli_args))
 
@@ -357,4 +440,5 @@ def main(args=None):
 if __name__ == '__main__':
   setup_path()
   cli_main = try_import_cli()
+  patch_non_standard_path_warning()
   main()
