@@ -4,7 +4,14 @@
 """:" #pts-letsencrypt: Convenient and secure wrapper for letsencrypt
 
 # This script needs Python 2.4 .. 2.7 to run. It doesn't work with Python 3.x.
-# It has been tested with Python 2.7.
+# It has been tested with Python 2.7. The shell script magic below makes it
+# also work within a miniconda2 install dir.
+export PYTHONDONTWRITEBYTECODE=1; B="${0%/*}"; C="$(readlink -- "$B")"
+B="${C:-$B}";if test -f "$B/python2.7"&&test -x "$B/../lib/ld-linux.so.2";then
+export LD_LIBRARY_PATH="$B"
+PYTHONPATH= exec "$B"/../lib/ld-linux.so.2 "$B"/python2.7 -- "$0" ${1+"$@"}
+exit 1;elif test -x "$B/python2.7";then
+PYTHONPATH= exec "$B"/python2.7 -- "$0" ${1+"$@"};exit 1;fi
 type python2.7 >/dev/null 2>&1 && exec python2.7 -- "$0" ${1+"$@"}
 type python2.6 >/dev/null 2>&1 && exec python2.6 -- "$0" ${1+"$@"}
 type python2.5 >/dev/null 2>&1 && exec python2.5 -- "$0" ${1+"$@"}
@@ -33,15 +40,12 @@ See the documentation of pts-letsencrypt for information aboute these:
 # This script is written carefully so that porting to Windows becomes possible
 # in the future.
 #
-# TODO(pts): Install six.
-# TODO(pts): What are the problems of letsencrypt as is? running as root; writing in too many dirs (hard to copy to another machine, and hard to move to another dir); trying to edit webserver configs; is interactive by default; has too many library dependencies; needs too many flags to specify for renewal, too confusing, other side: same cert for multiple domains; dialog
 # TODO(pts): Set umask, chmod certs vs chmod webroot dir. Protect everything (even after renew), but let the (non-root?) webserver access the live cert. At least restrict privkey.pem, but that's needed by the webserver.
-# TODO(pts): doc: Does nginx has to be reloaded to use the new cert?
 # TODO(pts): Remove more unused plugins and stuff from site-packages, especially the standalone plugin and everything not needed.
 # TODO(pts): If supporting multiple domains, consider the --expand flag.
 # TODO(pts): Restore the directory contents (except for csr) if renewal has failed.
 # TODO(pts): Disable flag prefix parsing (e.g. --renew for --renew-by-default).
-
+#
 
 def setup_path():
   import os  
@@ -66,14 +70,16 @@ def setup_path():
 def try_import_cli():
   import sys
   try:
-    import letsencrypt.cli
+    import letsencrypt.cli as mod
   except ImportError:
     print >>sys.stderr, (
         'fatal: Error importing letsencrypt.cli -- '
         'See messages below and read the installation instructions in the '
         'documentation of pts-letsencrypt.')
     raise
-  return letsencrypt.cli.main
+  if getattr(mod, 'main', None) is None:
+    import letsencrypt.main as mod  # Newer, letsencrypt-0.5.0
+  return mod.main
 
 
 def patch_non_standard_path_warning():
