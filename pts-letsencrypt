@@ -16,15 +16,15 @@ This script is written carefully so that porting to Windows becomes possible
 in the future.
 """
 
-# TODO(pts): What are the problems of letsencrypt as is? running as root; writing in too many dirs; trying to edit webserver configs; is interactive by default; has too many library dependencies; needs too many flags to specify for renewal, too confusing, other side: same cert for multiple domains
-# TODO(pts): Set umask, chmod certs vs chmod webroot dir. Protect everything (even after renew), but let the (non-root?) webserver access the live cert.
-# TODO(pts): Does ngingx has to be reloaded to use the new cert?
+# TODO(pts): What are the problems of letsencrypt as is? running as root; writing in too many dirs (hard to copy to another machine); trying to edit webserver configs; is interactive by default; has too many library dependencies; needs too many flags to specify for renewal, too confusing, other side: same cert for multiple domains
+# TODO(pts): Set umask, chmod certs vs chmod webroot dir. Protect everything (even after renew), but let the (non-root?) webserver access the live cert. At least restrict privkey.pem, but that's needed by the webserver.
+# TODO(pts): doc: Does nginx has to be reloaded to use the new cert?
 # TODO(pts): Add docs to the docstring, print the docstring for --help.
 # TODO(pts): Remove more unused plugins and stuff from site-packages, especially the standalone plugin and everything not needed.
-# TODO(pts): !! Don't renew if it's too early to renew (such as --keep, but certonly seems to ignore it, is _should_, why config.renew_by_default is True?). (Maybe not with --staging.)
-#   2016-04-12 15:45:34,857:INFO:letsencrypt.cli:Cert not yet due for renewal
 # TODO(pts): If supporting multiple domains, consider the --expand flag.
-# TODO(pts): Add command processing for `revoke'.
+# TODO(pts): Restore the directory contents (exept for csr) if renewal has failed.
+# TODO(pts): If the renewal/*.conf contains the wrong pathname, it can't be loaded. Either remove this file (if not needed) or make it a fatal error.
+# TODO(pts): Disable flag prefix parsing (e.g. --renew for --renew-by-default).
 
 
 def setup_path():
@@ -88,6 +88,8 @@ def usage():
       '  Useful flag for testing: --staging.\n'
       '%(argv0)s --config-dir=...\n'
       '  To renew a certificate. It remembers the flags at creation time.\n'
+      '%(argv0)s --config-dir=... --revoke\n'
+      '  To revoke a certificate.\n'
       '%(argv0)s --help all\n'
       '  To get the help of the letsencrypt tool.\n'
       '%(argv0)s [--<flag>=<value> ...] <command> [...]\n'
@@ -186,6 +188,8 @@ def process_flag(flags, arg):
       flags['v'] = flags.get('v', 0) + len(arg)
       return
     key, value = arg, True
+    if key == 'renew-by-default':
+      key = 'force-renewal'  # Canonicalize.
   else:
     key, value = arg[:j], arg[j + 1:]
     if key == 'authenticator':
@@ -229,13 +233,21 @@ def main(args=None):
       cmdargs.append(arg)
       cmdargs.extend(args[i:])
       break
-  dir_arg = flags.get('config-dir')
+  config_dir = flags.get('config-dir')
 
-  if cmdargs == [] and flags.get('help') is None:
-    if not dir_arg:
+  if ((cmdargs == [] or cmdargs == ['revoke']) and
+      flags.get('help') is None):
+    if not config_dir:
       print >>sys.stderr, 'fatal: Missing flag --config-dir=...'
       sys.exit(1)
+    # --revoke is not supported by letsencrypt, but we support it.
+    is_revoke = bool(flags.pop('revoke', None))
+    if cmdargs and cmdargs[0] == 'revoke':
+      del cmdargs[:]
+      is_revoke = True
     for key in ('renew', 'apache', 'nginx', 'manual'):
+      # There is no such flag as --renew, but it's silently treated as a prefix
+      # of --renew-by-default.
       if key in flags:
         print >>sys.stderr, 'fatal: Please do not specify --%s' % key
         sys.exit(1)
@@ -253,18 +265,16 @@ def main(args=None):
 
     flags2 = dict(flags)
     flags2.pop('config-dir', None)
-    flags2.pop('renew', None)
     flags2.pop('v', None)
     flags2.pop('keep-until-expiring', None)
     flags2.pop('keep', None)
     flags2.pop('reinstall', None)
     flags2.pop('force-renewal', None)
-    flags2.pop('renew-by-default', None)
     flags2.pop('autenticator', None)
 
     args2 = format_flags(flags2)
     config_data = ''.join(arg + '\n' for arg in args2)
-    config_fn = os.path.join(dir_arg, 'pts-letsencrypt.flags')
+    config_fn = os.path.join(config_dir, 'pts-letsencrypt.flags')
     if os.path.exists(config_fn):
       f = open(config_fn)
       rargs = []
@@ -288,7 +298,7 @@ def main(args=None):
             'fatal: For certificate renewal, just specify --config-dir=...')
         sys.exit(1)
     else:
-      mkdir_if_missing(dir_arg)
+      mkdir_if_missing(config_dir)
       f = open(config_fn, 'w')
       try:
         f.write(config_data)
@@ -318,16 +328,16 @@ def main(args=None):
       flags['standalone'] = True  # Equivalent: --authenticator=webroot
     else:
       flags['webroot'] = True  # Equivalent: --authenticator=standalone
-      flags['webroot-path'] = os.path.join(dir_arg, 'webroot')
-    mkdir_if_missing(dir_arg)
-    mkdir_if_missing(os.path.join(dir_arg, 'webroot'))
-    mkdir_if_missing(os.path.join(dir_arg, 'webroot', '.well-known'))
-    mkdir_if_missing(os.path.join(dir_arg, 'webroot', '.well-known',
+      flags['webroot-path'] = os.path.join(config_dir, 'webroot')
+    mkdir_if_missing(config_dir)
+    mkdir_if_missing(os.path.join(config_dir, 'webroot'))
+    mkdir_if_missing(os.path.join(config_dir, 'webroot', '.well-known'))
+    mkdir_if_missing(os.path.join(config_dir, 'webroot', '.well-known',
                                   'acme-challenge'))
-    mkdir_if_missing(os.path.join(dir_arg, 'work'))
-    mkdir_if_missing(os.path.join(dir_arg, 'log'))
+    mkdir_if_missing(os.path.join(config_dir, 'work'))
+    mkdir_if_missing(os.path.join(config_dir, 'log'))
 
-    plefn = os.path.join(dir_arg, 'webroot', '.well-known',
+    plefn = os.path.join(config_dir, 'webroot', '.well-known',
                          'acme-challenge', 'plemark.txt')
     import random
     import time
@@ -390,16 +400,34 @@ def main(args=None):
               (url[:url.rfind('/')], os.path.abspath(os.path.dirname(plefn))))
           sys.exit(2)
 
-      flags.setdefault('logs-dir', os.path.join(dir_arg, 'log'))
-      flags.setdefault('work-dir', os.path.join(dir_arg, 'work'))
+      flags.setdefault('logs-dir', os.path.join(config_dir, 'log'))
+      flags.setdefault('work-dir', os.path.join(config_dir, 'work'))
       # Not needed: flags['config'] = ...
-      if os.path.exists(os.path.join(dir_arg, 'csr')):
+      is_renew = False
+      csr_dir = os.path.join(config_dir, 'csr')
+      if os.path.exists(csr_dir):
         # Directory 'csr' was created when the certificate was first created.
         # So we want to renew.
-        flags['renew'] = True
+        is_renew = True
+      if is_revoke:
+        assert len(domains) == 1  # TODO(pts): How to revoke all?
+        flags.setdefault('cert-path', os.path.join(
+            config_dir, 'live', domains[0], 'cert.pem'))
+
       cli_args = format_flags(flags)
-      cli_args.append('certonly')
-      purpose = ('creation', 'renewal')[bool(flags.get('renew'))]
+      if is_revoke:
+        cli_args.append('revoke')
+      else:
+        cli_args.append('certonly')
+      assert not cmdargs, cmdargs
+      if is_revoke:
+        purpose = 'revocation'
+      elif is_renew:
+        purpose = 'renewal'
+      else:
+        purpose = 'creation'
+      csr_pem_count = sum(1 for entry in os.listdir(csr_dir)
+                          if entry.endswith('.pem'))
       print >>sys.stderr, 'info: Running letsencrypt for %s with args: %r' % (
           purpose, cli_args)
       try:
@@ -412,24 +440,42 @@ def main(args=None):
           traceback.print_exc()
       # TODO(pts): Remove the custom error handler set up by run_cli_main.
       if cli_error:
-        if not flags.get('renew'):
+        if is_revoke:
+          if (isinstance(cli_error, (tuple, list)) and
+              'already revoked' in str(cli_error[1]).lower()):
+            # This doesn't update the mtime of an existing file.
+            open(os.path.join(config_dir, 'revoked.stamp'), 'a')
+            # acme.messages.Error(typ=u'urn:acme:error:malformed', detail=u'Certificate already revoked', title=None)
+            print >>sys.stderr, 'fatal: Certificate already revoked.'
+            sys.exit(3)
+        elif not is_renew:
           for subdir in ('renewal', 'keys', 'csr', 'archive', 'accounts',
                          'live'):
-            remove_recursively(os.path.join(dir_arg, subdir))
-        print >>sys.stderr, 'error: Error running letsencrypt: %s' % (cli_error,)
+            remove_recursively(os.path.join(config_dir, subdir))
+        print >>sys.stderr, 'fatal: Error running letsencrypt: %s' % (cli_error,)
         sys.exit(3)
-      print >>sys.stderr, 'info: Certificate %s OK.' % purpose
+      csr_pem_count2 = sum(1 for entry in os.listdir(csr_dir)
+                           if entry.endswith('.pem'))
+      msg = 'Certificate %s OK.' % purpose
+      if is_revoke:
+        open(os.path.join(config_dir, 'revoked.stamp'), 'a')
+      elif is_renew:
+        if csr_pem_count == csr_pem_count2:
+          msg = ('Certificate %s skipped, not due for renewal yet. '
+                 'Rerun with --force-renewal to renew anyway.' % purpose)
+        else:
+          remove_if_exists(os.path.join(config_dir, 'revoked.stamp'))
+      print >>sys.stderr, 'info: %s' % msg
     finally:
       # Keep plefn until this so that cli_main doesn't try to remove the
       # acme-challenge dir.
       remove_if_exists(plefn)
     # The `IMPORTANT NOTES:' will be printed after this, in the exit hook.
     # If the certificate is not due for renewal, no notes are printed.
-    # TODO(pts): Always print an info message if it was not due.
   else:
-    if dir_arg is not None:
-      flags.setdefault('logs-dir', os.path.join(dir_arg, 'log'))
-      flags.setdefault('work-dir', os.path.join(dir_arg, 'work'))
+    if config_dir is not None:
+      flags.setdefault('logs-dir', os.path.join(config_dir, 'log'))
+      flags.setdefault('work-dir', os.path.join(config_dir, 'work'))
     cli_args = format_flags(flags)
     if cmdargs and cmdargs[0] == 'help':  # Workaround.
       cmdargs[0] = '--help'
