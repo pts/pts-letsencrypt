@@ -20,7 +20,7 @@ exec python -- ${1+"$@"}; exit 1
 """
 
 def setup_path():
-  import os  
+  import os
   import sys
   prog = sys.argv[0]
   try:

@@ -23,7 +23,7 @@ command-line tool. It calls letsencrypt with the right arguments to create,
 renew and revoke domain SSL certificates. It runs in batch mode (i.e. no
 interactive output from the user), and it can be called from cron jobs.
 
-See the documentation of pts-letsencrypt for information aboute these:
+See the documentation of pts-letsencrypt for information about these:
 
 * Installation instructions.
 
@@ -40,6 +40,7 @@ See the documentation of pts-letsencrypt for information aboute these:
 # This script is written carefully so that porting to Windows becomes possible
 # in the future.
 #
+# TODO(pts): Return status code, so don't reload nginx if not needed.
 # TODO(pts): Set umask, chmod certs vs chmod webroot dir. Protect everything (even after renew), but let the (non-root?) webserver access the live cert. At least restrict privkey.pem, but that's needed by the webserver.
 # TODO(pts): Remove more unused plugins and stuff from site-packages, especially the standalone plugin and everything not needed.
 # TODO(pts): If supporting multiple domains, consider the --expand flag.
@@ -48,7 +49,7 @@ See the documentation of pts-letsencrypt for information aboute these:
 #
 
 def setup_path():
-  import os  
+  import os
   import sys
   prog = sys.argv[0]
   try:
@@ -318,7 +319,7 @@ def main(args=None):
   setup_path()
   cli_main = try_import_cli()
   patch_non_standard_path_warning()
-  
+
   cmdargs = []
   i = 0
   while i < len(args):
