@@ -199,7 +199,7 @@ config snippet looks like this:
     # Add a new block for port 443.
     server {
       # ... must be the IP address corresponding to HOSTNAME.
-      listen ...:80;
+      listen ...:443;
       server_name HOSTNAME;
       ssl on;
       ssl_certificate     /ABSCONFIGDIR/live/HOSTNAME/fullchain.pem;
