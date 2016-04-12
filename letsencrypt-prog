@@ -1,0 +1,60 @@
+#! /bin/sh
+# by pts@fazekas.hu at Tue Apr 12 21:37:22 CEST 2016
+
+""":" #letsencrypt: Client for the letsencrypt.org certificate authority.
+
+# This script needs Python 2.4 .. 2.7 to run. It doesn't work with Python 3.x.
+# It has been tested with Python 2.7. The shell script magic below makes it
+# also work within a miniconda2 install dir.
+export PYTHONDONTWRITEBYTECODE=1; B="${0%/*}"; C="$(readlink -- "$B")"
+B="${C:-$B}";if test -f "$B/python2.7"&&test -x "$B/../lib/ld-linux.so.2";then
+export LD_LIBRARY_PATH="$B"
+PYTHONPATH= exec "$B"/../lib/ld-linux.so.2 "$B"/python2.7 -- "$0" ${1+"$@"}
+exit 1;elif test -x "$B/python2.7";then
+PYTHONPATH= exec "$B"/python2.7 -- "$0" ${1+"$@"};exit 1;fi
+type python2.7 >/dev/null 2>&1 && exec python2.7 -- "$0" ${1+"$@"}
+type python2.6 >/dev/null 2>&1 && exec python2.6 -- "$0" ${1+"$@"}
+type python2.5 >/dev/null 2>&1 && exec python2.5 -- "$0" ${1+"$@"}
+type python2.4 >/dev/null 2>&1 && exec python2.4 -- "$0" ${1+"$@"}
+exec python -- ${1+"$@"}; exit 1
+"""
+
+def setup_path():
+  import os  
+  import sys
+  prog = sys.argv[0]
+  try:
+    prog = os.readlink(prog)
+  except OSError:
+    pass
+  assert os.path.isfile(prog)
+  prog_dir = os.path.dirname(prog)
+  prog_dir = os.path.abspath(prog_dir)
+  if sys.path and sys.path[0] == prog_dir:
+    del sys.path[0]
+  sys.path[:0] = [os.path.join(prog_dir, 'lib'),
+                  os.path.join(prog_dir, 'site-packages')]
+
+
+def try_import_cli():
+  import sys
+  try:
+    import letsencrypt.cli as mod
+  except ImportError:
+    print >>sys.stderr, (
+        'fatal: Error importing letsencrypt.cli -- '
+        'See messages below and read the installation instructions in the '
+        'documentation of pts-letsencrypt.')
+    raise
+  if getattr(mod, 'main', None) is None:
+    import letsencrypt.main as mod  # Newer, letsencrypt-0.5.0
+  return mod.main
+
+
+def main():
+  import sys
+  sys.exit(try_import_cli()(cli_args=sys.argv[1:]))
+
+
+if __name__ == '__main__':
+  main()
