@@ -5,6 +5,24 @@ command-line tool. It calls letsencrypt with the right arguments to create,
 renew and revoke domain SSL certificates. It runs in batch mode (i.e. no
 interactive output from the user), and it can be called from cron jobs.
 
+Which letsencrypt.org client to use in production
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+* The reference client (the letsencrypt command-line tool). Probably not,
+  because it runs as root and has too many library dependencies, and this
+  doesn't sound secure.
+
+* pts-letsencrypt (https://github.com/pts/pts-letsencrypt). See the section
+  below why.
+
+* letsencrypt-nosude (https://github.com/diafygi/letsencrypt-nosudo). It can
+  easily be run on a different (non-production) server.
+
+* lego (written in Go, https://github.com/xenolf/lego). Versatile, and can
+  be compiled to a single, statically linked binary.
+
+* Probably there are other good ones, see them on
+  https://news.ycombinator.com/item?id=11480708  
+
 Why use pts-letsencrypt over the original letsencrypt command-line tool
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 * pts-letsencrypt should be run as non-root by design.
