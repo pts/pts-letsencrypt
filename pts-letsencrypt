@@ -41,8 +41,6 @@ See the documentation of pts-letsencrypt for information about these:
 # in the future.
 #
 # TODO(pts): Return status code, so don't reload nginx if not needed.
-# TODO(pts): Set umask, chmod certs vs chmod webroot dir. Protect everything (even after renew), but let the (non-root?) webserver access the live cert. At least restrict privkey.pem, but that's needed by the webserver.
-# TODO(pts): Remove more unused plugins and stuff from site-packages, especially the standalone plugin and everything not needed.
 # TODO(pts): If supporting multiple domains, consider the --expand flag.
 # TODO(pts): Restore the directory contents (except for csr) if renewal has failed.
 # TODO(pts): Disable flag prefix parsing (e.g. --renew for --renew-by-default).
@@ -124,13 +122,21 @@ def usage():
       {'argv0': sys.argv[0]})
 
 
-def mkdir_if_missing(dirname):
+def mkdir_if_missing(dirname, mode=None):
   import os
   try:
-    os.mkdir(dirname)
+    if mode is not None:
+      # `mode' can also be present on Windows.
+      # On Unix, the os.umask() applies.
+      os.mkdir(dirname, mode)
+    else:
+      os.mkdir(dirname)
   except OSError:
     if not os.path.isdir(dirname):
       raise
+  if mode is not None and callable(getattr(os, 'chmod', None)):
+    # Unconditional chmod, even if the directory has existed.
+    os.chmod(dirname, mode & (0777 & ~0022))
 
 
 def rmdir_if_exists(filename):
@@ -287,6 +293,49 @@ def get_csr_pem_count(csr_dir):
     return 0
 
 
+def check_world_readable(config_dir):
+  import os
+  import sys
+  challenge_dir = os.path.abspath(os.path.join(
+      config_dir, 'webroot', '.well-known', 'acme-challenge'))
+  dirpaths = [challenge_dir]
+  for _ in xrange(1000):
+    dirpath = os.path.dirname(dirpaths[-1])
+    if dirpath == dirpaths[-1]:
+      break
+    dirpaths.append(dirpath)
+  assert len(dirpaths) < 999, dirpaths  # Avoid infinite loop.
+  badpaths = []
+  for dirpath in reversed(dirpaths):
+    st = os.stat(dirpath)
+    if (st.st_mode & 0055) != 0055:
+      badpaths.append(dirpath)
+  if badpaths:
+    import pipes
+    print >>sys.stderr, (
+        'warning: The directory %s is not reachable and readable by any '
+        'user, and webserver typically need this to read and serve '
+        'the acme-challenge files.\n'
+        '         Fix it by running: chmod go+rx -- %s' %
+        (challenge_dir, ' '.join(map(pipes.quote, badpaths))))
+
+
+def chmod_hide_privkeys(config_dir):
+  import os
+  if not callable(getattr(os, 'chmod', None)):  # On windows.
+    return
+  keys_dir = os.path.join(config_dir, 'keys')
+  for entry in os.listdir(keys_dir):
+    # Example entry: '0000_key-letsencrypt.pem'.
+    os.chmod(os.path.join(keys_dir, entry), 0400)
+  archive_dir = os.path.join(config_dir, 'archive')
+  for archive_domain in os.listdir(archive_dir):
+    archive_domain_dir = os.path.join(archive_dir, archive_domain)
+    for entry in os.listdir(archive_domain_dir):
+      if entry.startswith('privkey'): # E.g. privkey1.pem.
+        os.chmod(os.path.join(archive_domain_dir, entry), 0400)
+
+
 def main(args=None):
   """Function which is run when the script is started."""
 
@@ -319,6 +368,11 @@ def main(args=None):
   setup_path()
   cli_main = try_import_cli()
   patch_non_standard_path_warning()
+
+  if callable(getattr(os, 'umask', None)):
+    # Make newly created files in webroot world-readable, for the
+    # acme-challenge. The umask is also used by cli_main.
+    os.umask(0022)
 
   cmdargs = []
   i = 0
@@ -401,7 +455,7 @@ def main(args=None):
     else:
       rargs = []
     if args2 and not rargs:
-      mkdir_if_missing(config_dir)
+      mkdir_if_missing(config_dir, 0755)
       f = open(config_fn, 'w')
       try:
         f.write(config_data)
@@ -425,20 +479,42 @@ def main(args=None):
       print >>sys.stderr, 'fatal: Currently unsupported comma in --domains=...'
       sys.exit(1)
     flags['domains'] = ','.join(domains)
-
     # (under .well-known/acme-challenge/)
     if is_standalone:
       flags['standalone'] = True  # Equivalent: --authenticator=webroot
     else:
       flags['webroot'] = True  # Equivalent: --authenticator=standalone
       flags['webroot-path'] = os.path.join(config_dir, 'webroot')
-    mkdir_if_missing(config_dir)
-    mkdir_if_missing(os.path.join(config_dir, 'webroot'))
-    mkdir_if_missing(os.path.join(config_dir, 'webroot', '.well-known'))
+
+    # We hide all directories from other users except for webroot, which needs
+    # to be readable by the webserver workers, typically not running as root.
+    #
+    # Especially the live/*/privkey*.pem files must be non-readable by
+    # most users. This is not a problem for nginx running as root, because it
+    # reads the ssl_certificate_key at startup time, still running as root.
+    # Also keys/*.pem contains copies of some files in live/*/privkey*.pem,
+    # so those keys should also be non-readable by most users.
+    #
+    # There is no need to chmod files, because the permissions (0644) based on
+    # our umask (0022) are just right for the files created directly by this
+    # function, because those files aren't secret.
+    csr_dir = os.path.join(config_dir, 'csr')
+    mkdir_if_missing(config_dir, 0755)
+    mkdir_if_missing(os.path.join(config_dir, 'webroot'), 0755)
+    mkdir_if_missing(os.path.join(config_dir, 'webroot', '.well-known'), 0755)
     mkdir_if_missing(os.path.join(config_dir, 'webroot', '.well-known',
-                                  'acme-challenge'))
-    mkdir_if_missing(os.path.join(config_dir, 'work'))
-    mkdir_if_missing(os.path.join(config_dir, 'log'))
+                                  'acme-challenge'), 0755)
+    mkdir_if_missing(os.path.join(config_dir, 'work'), 0700)
+    mkdir_if_missing(os.path.join(config_dir, 'accounts'), 0700)
+    mkdir_if_missing(os.path.join(config_dir, 'archive'), 0700)
+    mkdir_if_missing(csr_dir, 0700)
+    mkdir_if_missing(os.path.join(config_dir, 'keys'), 0700)
+    mkdir_if_missing(os.path.join(config_dir, 'live'), 0700)
+    mkdir_if_missing(os.path.join(config_dir, 'log'), 0700)
+    mkdir_if_missing(os.path.join(config_dir, 'renewal'), 0700)
+
+    check_world_readable(config_dir)
+
     fix_renewal_configs(config_dir, domains, flags.get('server'))
 
     plefn = os.path.join(config_dir, 'webroot', '.well-known',
@@ -449,6 +525,7 @@ def main(args=None):
     pledata = '%08x' % (int(time.time()) & 0xffffffff) + ''.join(
         '%02x' % random.randrange(256) for i in xrange(30)) + '\n'
     try:
+      remove_if_exists(plefn)  # To recreate it with the permissions 0644.
       f = open(plefn, 'w')
       try:
         f.write(pledata)
@@ -500,8 +577,9 @@ def main(args=None):
               '       Expected: %r' %
               (url, http_result, expected_http_result))
           print >>sys.stderr, (
-              'fatal: Please set up your webserver on localhost so that '
-              '%s/ serves %s/ , and rerun this command.' %
+              'fatal: Please set up your webserver (change config and reload '
+              'webserver) on localhost so that '
+              '%s/ will serve %s/ , and rerun this command.' %
               (url[:url.rfind('/')], os.path.abspath(os.path.dirname(plefn))))
           sys.exit(2)
 
@@ -509,8 +587,8 @@ def main(args=None):
       flags.setdefault('work-dir', os.path.join(config_dir, 'work'))
       # Not needed: flags['config'] = ...
       is_renew = False
-      csr_dir = os.path.join(config_dir, 'csr')
-      if os.path.exists(csr_dir):
+      csr_pem_count = get_csr_pem_count(csr_dir)
+      if csr_pem_count:
         # Directory 'csr' was created when the certificate was first created.
         # So we want to renew.
         is_renew = True
@@ -531,7 +609,6 @@ def main(args=None):
         purpose = 'renewal'
       else:
         purpose = 'creation'
-      csr_pem_count = get_csr_pem_count(csr_dir)
       print >>sys.stderr, 'info: Running letsencrypt for %s with args: %r' % (
           purpose, cli_args)
       try:
@@ -543,7 +620,6 @@ def main(args=None):
         if flags.get('v') > 0:
           traceback.print_exc()
       fix_renewal_configs(config_dir, domains, flags.get('server'))
-      # TODO(pts): Remove the custom error handler set up by run_cli_main.
       if cli_error:
         if is_revoke:
           if (isinstance(cli_error, (tuple, list)) and
@@ -570,6 +646,9 @@ def main(args=None):
         else:
           remove_if_exists(os.path.join(config_dir, 'revoked.stamp'))
       print >>sys.stderr, 'info: %s' % msg
+      # This is not strictly necessary, because the directory permissions are
+      # strict enough. This is just to make double sure.
+      chmod_hide_privkeys(config_dir)
     finally:
       # Keep plefn until this so that cli_main doesn't try to remove the
       # acme-challenge dir.

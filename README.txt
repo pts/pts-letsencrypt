@@ -54,6 +54,12 @@ Why use pts-letsencrypt over the original letsencrypt command-line tool
 
 * pts-letsencrypt needs only few command-line flags to be specified.
 
+* pts-letsencrypt restricts the permissions of the files and directories it
+  creates, so other (non-root) users on the same machine won't be able to
+  make a copy of the private key (to be used e.g. for decrypting captured
+  SSL traffic). It also hides the private keys (privkey*.pem files) and
+  everything except the webroot dir from all other users (except for root).
+
 A limitation of pts-letsencrypt: currently it supports only 1 domain name per
 certificate. (This limitation can be lifted in the future.)
 
@@ -180,11 +186,10 @@ need to add a `location' tag, like this:
   }
 
 Give enough permission for the Unix user the webserver is using (e.g.
-www-data) to read (chmod a+wx) directories in the path to.
-/ABSCONFIGDIR/webroot/.well-known/acme-challenge . If the file plemark.txt
-there is unreadable to that user, then remove it, and set a more permissive
-umask (command `umask 0022' as the non-root user right before running
-pts-letsencrypt).
+www-data) to read (chmod a+wx) directories in the path to
+/ABSCONFIGDIR/webroot/.well-known/acme-challenge . pts-letsencrypt will
+verify this and issue a warning (displaying the chmod command you have to
+run) if permissions aren't broad enough.
 
 Make your webserver reload its config. For example, if you use nginx (as root):
 
