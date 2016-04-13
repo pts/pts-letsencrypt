@@ -637,12 +637,14 @@ def main(args=None):
         sys.exit(3)
       csr_pem_count2 = get_csr_pem_count(csr_dir)
       msg = 'Certificate %s OK.' % purpose
+      is_not_due = False
       if is_revoke:
         open(os.path.join(config_dir, 'revoked.stamp'), 'a')
       elif is_renew:
         if csr_pem_count == csr_pem_count2:
           msg = ('Certificate %s skipped, not due for renewal yet. '
                  'Rerun with --force-renewal to renew anyway.' % purpose)
+          is_not_due = True
         else:
           remove_if_exists(os.path.join(config_dir, 'revoked.stamp'))
       print >>sys.stderr, 'info: %s' % msg
@@ -655,6 +657,8 @@ def main(args=None):
       remove_if_exists(plefn)
     # The `IMPORTANT NOTES:' will be printed after this, in the exit hook.
     # If the certificate is not due for renewal, no notes are printed.
+    if is_not_due:
+      sys.exit(77)  # Calling scripts can act on this exit code.
   else:
     if config_dir is not None:
       flags.setdefault('logs-dir', os.path.join(config_dir, 'log'))
