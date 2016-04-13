@@ -72,20 +72,20 @@ If you are running Linux on i386 or x86_64 architectures, there is a binary
 release. Here is how to download and use it (as non-root, don't type the
 leading $s):
 
-  $ rm -f pts-letsencrypt-0.5.0.2.sfx.7z
-  $ wget https://github.com/pts/pts-letsencrypt/releases/download/v0.5.0.2/pts-letsencrypt-0.5.0.2.sfx.7z
-  $ chmod +x pts-letsencrypt-0.5.0.2.sfx.7z
-  $ ./pts-letsencrypt-0.5.0.2.sfx.7z
-  $ ls -l pts-letsencrypt-0.5.0.2/bin/pts-letsencrypt
-  $ pts-letsencrypt-0.5.0.2/bin/pts-letsencrypt --help
-  $ pts-letsencrypt-0.5.0.2/bin/pts-letsencrypt --help all
+  $ rm -f pts-letsencrypt-0.5.0.3.sfx.7z
+  $ wget https://github.com/pts/pts-letsencrypt/releases/download/v0.5.0.3/pts-letsencrypt-0.5.0.3.sfx.7z
+  $ chmod +x pts-letsencrypt-0.5.0.3.sfx.7z
+  $ ./pts-letsencrypt-0.5.0.3.sfx.7z
+  $ ls -l pts-letsencrypt-0.5.0.3/bin/pts-letsencrypt
+  $ pts-letsencrypt-0.5.0.3/bin/pts-letsencrypt --help
+  $ pts-letsencrypt-0.5.0.3/bin/pts-letsencrypt --help all
 
 The download size is about 11 MB, and it will use about 55 MB of space when
 extracted. It works on any Linux (i386 or x86_64) system, it's
 self-contained, it doesn't use any system libraries (e.g. libc) neither for
 installation nor for running.
 
-You can move the installation directory (pts-letsencrypt-0.5.0.2) around, and
+You can move the installation directory (pts-letsencrypt-0.5.0.3) around, and
 you can create symlinks to the pts-letsencrypt executable. Users running
 pts-letsencrypt need only read-only access to the directory.
 
