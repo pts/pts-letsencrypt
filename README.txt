@@ -7,14 +7,18 @@ interactive output from the user), and it can be called from cron jobs.
 
 Which letsencrypt.org client to use in production
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-* The reference client (the letsencrypt command-line tool). Probably not,
-  because it runs as root and has too many library dependencies, and this
-  doesn't sound secure.
+* The official reference client (the letsencrypt command-line tool).
+  Probably not, because it runs as root and has too many library
+  dependencies, and this doesn't sound secure.
 
 * pts-letsencrypt (https://github.com/pts/pts-letsencrypt). See the section
   below why.
 
-* letsencrypt-nosude (https://github.com/diafygi/letsencrypt-nosudo). It can
+* acme-tiny (https://github.com/diafygi/acme-tiny). A very short Python
+  script with a few dependencies only. If you understand its documentation,
+  give it a try.
+
+* letsencrypt-nosudo (https://github.com/diafygi/letsencrypt-nosudo). It can
   easily be run on a different (non-production) server.
 
 * lego (written in Go, https://github.com/xenolf/lego). Versatile, and can
